@@ -25,10 +25,11 @@ let config =
         }"
 let system = System.create "Twitter" config
 
-let MyengineActor (numNodesVal:int) (numTweetsVal:int) (mailbox : Actor<_>) = 
+let MyengineActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailbox : Actor<_>) = 
 
     let numNodes = numNodesVal 
     let numTweets = numTweetsVal
+    let modeOfOperation = operation
     let mutable subscribers = Map.empty
     let mutable tweetsToBeSent = Map.empty
     let mutable allTweets = Map.empty
@@ -128,9 +129,10 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (mailbox : Actor<_>) =
                 userSubscribedTweets <- userSubscribedTweets.Add(workerName, [|""|])
                 // add subscribers
                 let mutable userSubscribers = [|0|]
-                for j in 1..(numNodes/(i+2)) do
-                    userSubscribers <- Array.concat [| userSubscribers ; [|j|] |]
-                printfn "%d: %A" i userSubscribers
+                if modeOfOperation = "zipf" then
+                    for j in 1..(numNodes/(i+2)) do
+                        userSubscribers <- Array.concat [| userSubscribers ; [|j|] |]
+                    printfn "%d: %A" i userSubscribers
                 subscribers <- subscribers.Add(workerName, userSubscribers)
 
             hashtagTweets <- hashtagTweets.Add("", [|""|])
@@ -255,7 +257,7 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (mailbox : Actor<_>) =
                             allUsers <- allUsers |> Array.filter ((<>) i )
                         allUsers <- allUsers |> Array.filter ((<>) userId )
                         let mutable randomNewSub = random.Next(allUsers.Length)
-                        userSubscribers <- Array.concat [| userSubscribers ; [|randomNewSub|] |] 
+                        userSubscribers <- Array.concat [| userSubscribers ; [|allUsers.[randomNewSub]|] |] 
                         subscribers <- subscribers.Add(userName, userSubscribers)
                         printfn "%d is subscribing to %d" userId randomNewSub
 
@@ -367,8 +369,9 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (mailbox : Actor<_>) =
 let main argv =
     let numNodes = ((Array.get argv 1) |> int)
     let numTweets = ((Array.get argv 2) |> int)
+    let modeOfOperation = ((Array.get argv 3) |> string)
 
-    let engineActor = spawn system "engineActor" (MyengineActor numNodes numTweets)
+    let engineActor = spawn system "engineActor" (MyengineActor numNodes numTweets modeOfOperation)
     let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9002/user/engineActor") system
     let data = {Author = ""; Message = ""; Operation = "StartEngine"}
     let json = Json.serialize data

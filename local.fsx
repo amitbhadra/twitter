@@ -47,10 +47,11 @@ let mutable totalUsers = 0
  
 let system = System.create "Twitter" config
 
-let MyUserActor (actorNameVal:string) (actorId:int) (mailbox : Actor<_>) = 
+let MyUserActor (actorNameVal:string) (actorId:int) (operation:string) (mailbox : Actor<_>) = 
 
     let selfName = actorNameVal
     let selfId = actorId
+    let modeOfOperation = operation
     let mutable selfTweets =  Array.create 0 ""
     let mutable receivedTweets = Array.empty
     let selfStopwatch = System.Diagnostics.Stopwatch()
@@ -102,7 +103,7 @@ let MyUserActor (actorNameVal:string) (actorId:int) (mailbox : Actor<_>) =
                     let data = {Author = "" |> string; Message = ""; Operation = "RetweetInit"}
                     let json = Json.serialize data
                     destinationRef <! json
-                elif actions.[actionId] = "subscribe" then
+                elif actions.[actionId] = "subscribe" && modeOfOperation <> "zipf" then
                     // mailbox.Self <! SubscribeInit
                     let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (selfId |> string)) system
                     let data = {Author = "" |> string; Message = ""; Operation = "SubscribeInit"}
@@ -285,10 +286,11 @@ let MyUserActor (actorNameVal:string) (actorId:int) (mailbox : Actor<_>) =
     }
     loop ()
 
-let MybossActor (numNodesVal:int) (numTweetsVal:int) (mailbox : Actor<_>) = 
+let MybossActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailbox : Actor<_>) = 
 
     let numNodes = numNodesVal 
     let numTweets = numTweetsVal
+    let modeOfOperation = operation
     let selfStopwatchBoss = System.Diagnostics.Stopwatch()
     let mutable oldTimeBoss = 0.0
     
@@ -311,7 +313,7 @@ let MybossActor (numNodesVal:int) (numTweetsVal:int) (mailbox : Actor<_>) =
 
             for i in 0..numNodes-1 do
                 let mutable workerName = sprintf "User%i" i
-                let mutable userActor = spawn system workerName (MyUserActor workerName i)
+                let mutable userActor = spawn system workerName (MyUserActor workerName i modeOfOperation)
                 let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (i |> string)) system
                 let data = {Author = ""; Message = workerName; Operation = "Register"}
                 let json = Json.serialize data
@@ -354,8 +356,6 @@ let MybossActor (numNodesVal:int) (numTweetsVal:int) (mailbox : Actor<_>) =
                 0|> ignore
             oldTimeBoss <- float(selfStopwatchBoss.Elapsed.TotalSeconds)
             mailbox.Self <! SimulateBoss
-            
-        | _-> 0|>ignore 
 
         return! loop()
     }
@@ -367,9 +367,10 @@ let MybossActor (numNodesVal:int) (numTweetsVal:int) (mailbox : Actor<_>) =
 let main argv =
     let numNodes = ((Array.get argv 1) |> int)
     let numTweets = ((Array.get argv 2) |> int)
+    let modeOfOperation = ((Array.get argv 3) |> string)
     totalUsers <- numNodes
     totalTweetsToBeSent <- numTweets
-    let bossActor = spawn system "bossActor" (MybossActor numNodes numTweets)
+    let bossActor = spawn system "bossActor" (MybossActor numNodes numTweets modeOfOperation)
     let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/bossActor") system
     destinationRef <! StartBoss
 
