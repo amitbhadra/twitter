@@ -1,7 +1,6 @@
 ﻿#r "nuget: Akka.FSharp" 
 #r "nuget: Akka.Remote"
 #r "nuget: FSharp.Json"
-
 #load @"./Constants.fsx"
 #load @"./MessageTypes.fsx"
 
@@ -21,6 +20,8 @@ let config =
             remote.helios.tcp {
                 hostname = ""127.0.0.1""
                 port = 9002
+            log-dead-letters-during-shutdown = off
+            log-dead-letters = off
             }
         }"
 let system = System.create "Twitter" config
@@ -106,23 +107,17 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailb
 
     
     let rec loop() = actor {
-        printfn "Actor called"
         let! json = mailbox.Receive()
         let message = Json.deserialize<TweetApiMessage> json
-        printfn "Actor called with %A" message
-
         let sender = mailbox.Sender()
-        
         let operation = message.Operation
         
         match operation with
-
         | "StartEngine" ->
-            printfn "StartEngine"
+            Console.WriteLine("Initializing all users...")
             for i in 0..numNodes-1 do
                 let mutable workerName = sprintf "User%i" i
                 subscribers <- subscribers.Add(workerName, [|-1|])
-                // tweetsToBeSent <- tweetsToBeSent.Add(workerName, [|""|])
                 tweetsToBeSent <- tweetsToBeSent.Add(workerName, [|{Author = ""; Message = ""}|])
                 allTweets <- allTweets.Add(workerName, [|""|])
                 myMentions <- myMentions.Add(workerName, [|""|])
@@ -136,24 +131,21 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailb
                 subscribers <- subscribers.Add(workerName, userSubscribers)
 
             hashtagTweets <- hashtagTweets.Add("", [|""|])
+            Console.WriteLine("Initialized all users!")
             selfStopwatchEngine.Start()
 
         | "GetNumNodes" ->
-            printfn "GetNumNodes"
             let userId = message.Author |> int
             let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
             let data = {Author = userId |> string; Message = numNodes |> string; Operation = "GetNumNodes"}
             let json = Json.serialize data
             destinationRef <! json
-            // let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
-            // destinationRef <! GetNumNodes(numNodes, userId)
 
         | "Tweet" ->
-            printfn "Tweet"
             let userId = message.Author |> int
             let tweetString = message.Message
             tweetsReceived <- tweetsReceived + 1
-            printfn "Tweets received = %d" tweetsReceived
+            Console.WriteLine("[{0}]==>TWEET: User{1} @ {2}", string(selfStopwatchEngine.Elapsed.TotalSeconds), userId, tweetString)
             if tweetsReceived = numTweets then
                 for userId in 0..numNodes-1 do
                     let mutable userName = sprintf "User%i" userId
@@ -214,8 +206,6 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailb
                                     userFoundOffline <- true
                         if userFoundOffline then
                             let mutable usertweetsToBeSent = tweetsToBeSent.[destination]
-                            // usertweetsToBeSent <- usertweetsToBeSent |> Array.filter ((<>) tweetString )
-                            // usertweetsToBeSent <- usertweetsToBeSent |> Array.filter ((<>) "" )
                             usertweetsToBeSent <- Array.concat [| usertweetsToBeSent ; [|tweet|] |]
                             tweetsToBeSent <- tweetsToBeSent.Add(destination, usertweetsToBeSent)
                         else
@@ -223,12 +213,9 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailb
                             let data = {Author = userName |> string; Message = tweetString; Operation = "ReceiveTweet"}
                             let json = Json.serialize data
                             destinationRef <! json
-                            // let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (subs |> string)) system
-                            // destinationRef <! ReceiveTweet(tweet)
                     
         | "Retweet" ->
             // choose a random user and ask them for a random tweet
-            printfn "Retweet"
             let userId = message.Author |> int
             let mutable randomUserId = random.Next(numNodes)
             let mutable randomUserName = sprintf "User%i" randomUserId
@@ -239,11 +226,8 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailb
                 let data = {Author = "" |> string; Message = allRandomUserTweets.[randomTweetNumber]; Operation = "ReceiveTweet"}
                 let json = Json.serialize data
                 destinationRef <! json
-                // let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
-                // destinationRef <! RetweetReceive()
 
         | "Subscribe" ->
-            printfn "Subscribe"
             let userId = message.Author |> int
             let mutable allUsers = [|0..numNodes-1|]
             let mutable userName = sprintf "User%i" userId
@@ -259,50 +243,42 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailb
                         let mutable randomNewSub = random.Next(allUsers.Length)
                         userSubscribers <- Array.concat [| userSubscribers ; [|allUsers.[randomNewSub]|] |] 
                         subscribers <- subscribers.Add(userName, userSubscribers)
-                        printfn "%d is subscribing to %d" userId randomNewSub
+                        Console.WriteLine("[{0}]==>SUBSCRIBE: User{1} to User{2}", string(selfStopwatchEngine.Elapsed.TotalSeconds), userId, randomNewSub)
 
         | "GoOffline" ->
-            printfn "GoOffline"
+            Console.WriteLine("GoOffline")
             let userId = message.Author |> int
             offlineUsers <- offlineUsers |> Array.filter ((<>) userId )
             offlineUsers <- Array.concat [| offlineUsers ; [|userId|] |] 
-            // let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
-            // destinationRef <! GoOffline(userId)
             let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
             let data = {Author = userId |> string; Message = ""; Operation = "GoOffline"}
             let json = Json.serialize data
             destinationRef <! json
 
         | "GoOnline" ->
-            printfn "GoOnline"
+            Console.WriteLine("GoOnline")
             let userId = message.Author |> int
             let mutable userName = sprintf "User%i" userId
             if userId < numNodes then
                 let mutable usertweetsToBeSent = tweetsToBeSent.[userName]
-                // usertweetsToBeSent <- usertweetsToBeSent |> Array.filter ((<>) "" )
                 offlineUsers <- offlineUsers |> Array.filter ((<>) userId )
                 for tweet in usertweetsToBeSent do
                     let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
                     let data = {Author = tweet.Author |> string; Message = tweet.Message; Operation = "ReceiveTweet"}
                     let json = Json.serialize data
                     destinationRef <! json
-                    // let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
-                    // destinationRef <! ReceiveTweet(tweet)
                 tweetsToBeSent <- tweetsToBeSent.Add(userName, [|{Author = ""; Message = ""}|])
 
         | "QuerySubscribedTweets" ->
-            printfn "QuerySubscribedTweets"
             let userId = message.Author |> int
             let searchString = message.Message
             let mutable userName = sprintf "User%i" userId
             let mutable newUserSubTweets = userSubscribedTweets.[userName]
             newUserSubTweets <- newUserSubTweets |> Array.filter ((<>) "" )
             let mutable tweetsFound = searchTweets newUserSubTweets searchString
-            // let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
             let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
 
             if tweetsFound.Length <> 0 then
-                // destinationRef <! ReceiveQuerySubscribedTweets(searchString, tweetsFound)
                 let arr = Json.serialize tweetsFound    
                 let data = {Author = searchString |> string; Message = arr; Operation = "ReceiveQuerySubscribedTweets"}
                 let json = Json.serialize data
@@ -312,15 +288,12 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailb
                 let data = {Author = searchString |> string; Message = arr; Operation = "ReceiveQuerySubscribedTweets"}
                 let json = Json.serialize data
                 destinationRef <! json
-                // destinationRef <! ReceiveQuerySubscribedTweets(searchString, [| "No tweets found" |])
 
         | "QueryHashtags" ->
-            printfn "QueryHashtags"
             let userId = message.Author |> int  
             let hashtagQuery = message.Message
             if userId < numNodes then
                 let hashtagString = stripchars "#" hashtagQuery
-                // let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
                 let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
                 if hashtagTweets.ContainsKey(hashtagString) then
                     let mutable tweetsFound = hashtagTweets.[hashtagString]
@@ -328,24 +301,19 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailb
                     let data = {Author = hashtagQuery |> string; Message = arr; Operation = "ReceiveQueryHashtags"}
                     let json = Json.serialize data
                     destinationRef <! json
-                    // destinationRef <! ReceiveQueryHashtags(hashtagQuery, tweetsFound)
                 else
                     let arr = Json.serialize [| "No tweets found" |]    
                     let data = {Author = hashtagQuery |> string; Message = arr; Operation = "ReceiveQueryHashtags"}
                     let json = Json.serialize data
                     destinationRef <! json
-                    // destinationRef <! ReceiveQueryHashtags(hashtagQuery, [| "No tweets found" |])
 
         | "QueryMentions" ->
-            printfn "QueryMentions"
             let userId = message.Author |> int  
             let mutable userName = sprintf "User%i" userId
             let mutable userMentions = myMentions.[userName]
-            // let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
             let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
             
             if userMentions.Length <> 0 then
-                // destinationRef <! ReceiveQueryMentions(userMentions)
                 let arr = Json.serialize userMentions    
                 let data = {Author = "" |> string; Message = arr; Operation = "ReceiveQueryMentions"}
                 let json = Json.serialize data
@@ -355,7 +323,6 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailb
                 let data = {Author = "" |> string; Message = arr; Operation = "ReceiveQueryMentions"}
                 let json = Json.serialize data
                 destinationRef <! json
-                // destinationRef <! ReceiveQueryMentions([| "No tweets found" |])
             
         | _ -> 
             printfn "Invalid Request"
@@ -377,7 +344,7 @@ let main argv =
     let json = Json.serialize data
     destinationRef <! json
 
-    printfn "Done with engineActor"
+    Console.WriteLine("Done with engineActor")
 
     while(ALL_COMPUTATIONS_DONE = 0) do
         0|>ignore
