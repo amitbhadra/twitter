@@ -1,4 +1,5 @@
-﻿#load @"./Constants.fsx"
+﻿open System.Threading
+#load @"./Constants.fsx"
 #load @"./MessageTypes.fsx"
 #r "nuget: Akka.FSharp" 
 #r "nuget: Akka.TestKit" 
@@ -254,9 +255,11 @@ let MybossActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailbox
             selfStopwatchBoss.Start()
             oldTimeBoss <- float(selfStopwatchBoss.Elapsed.TotalSeconds)
 
-            while float(selfStopwatchBoss.Elapsed.TotalSeconds) - oldTimeBoss < 5.0 do
+            while float(selfStopwatchBoss.Elapsed.TotalSeconds) - oldTimeBoss < 60.0 do
                 0|> ignore
 
+            //Thread.Sleep(15000)
+            
             // Send signal to all users to start their processes
             for i in 0..numNodes-1 do
                 let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (i |> string)) system
@@ -272,6 +275,7 @@ let MybossActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailbox
         | SimulateBoss ->
 
             // choose random num/100 nodes and make them offline
+            
             for i in 0..numNodes/100 do
                 let mutable offlineNodeId = random.Next(numNodes)
                 Console.WriteLine("[{0}]==> Setting {1} offline", selfStopwatchBoss.Elapsed.TotalSeconds, offlineNodeId)

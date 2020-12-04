@@ -24,21 +24,37 @@ let config =
             log-dead-letters = off
             }
         }"
+
+let config2 =
+    Configuration.parse
+        @"akka {
+            actor.provider = ""Akka.Remote.RemoteActorRefProvider, Akka.Remote""
+            remote.helios.tcp {
+                hostname = ""127.0.0.1""
+                port = 9003
+            log-dead-letters-during-shutdown = off
+            log-dead-letters = off
+            }
+        }"
 let system = System.create "Twitter" config
+let system2 = System.create "Twitter" config2
 
-let MyengineActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailbox : Actor<_>) = 
+let mutable subscribers = Map.empty
+let mutable tweetsToBeSent = Map.empty
+let mutable allTweets = Map.empty
+let mutable userSubscribedTweets = Map.empty
+let mutable myMentions = Map.empty
+let mutable offlineUsers = Array.empty
+let mutable hashtagTweets = Map.empty
+let mutable tweetsReceived = 0
 
+let MyengineActor (myId:int) (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailbox : Actor<_>) = 
+
+    let selfId = myId
     let numNodes = numNodesVal 
     let numTweets = numTweetsVal
     let modeOfOperation = operation
-    let mutable subscribers = Map.empty
-    let mutable tweetsToBeSent = Map.empty
-    let mutable allTweets = Map.empty
-    let mutable userSubscribedTweets = Map.empty
-    let mutable myMentions = Map.empty
-    let mutable offlineUsers = Array.empty
-    let mutable hashtagTweets = Map.empty
-    let mutable tweetsReceived = 0
+    
     let selfStopwatchEngine = System.Diagnostics.Stopwatch()
 
     let searchMentions newTweet=
@@ -114,21 +130,22 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailb
         
         match operation with
         | "StartEngine" ->
-            Console.WriteLine("Initializing all users...")
-            for i in 0..numNodes-1 do
-                let mutable workerName = sprintf "User%i" i
-                subscribers <- subscribers.Add(workerName, [|-1|])
-                tweetsToBeSent <- tweetsToBeSent.Add(workerName, [|{Author = ""; Message = ""}|])
-                allTweets <- allTweets.Add(workerName, [|""|])
-                myMentions <- myMentions.Add(workerName, [|""|])
-                userSubscribedTweets <- userSubscribedTweets.Add(workerName, [|""|])
-                // add subscribers
-                let mutable userSubscribers = [|0|]
-                if modeOfOperation = "zipf" then
-                    for j in 1..(numNodes/(i+2)) do
-                        userSubscribers <- Array.concat [| userSubscribers ; [|j|] |]
-                    printfn "%d: %A" i userSubscribers
-                subscribers <- subscribers.Add(workerName, userSubscribers)
+            Console.WriteLine("Initializing Engine{0}...", selfId)
+            let i = selfId
+
+            let mutable workerName = sprintf "User%i" i
+            subscribers <- subscribers.Add(workerName, [|-1|])
+            tweetsToBeSent <- tweetsToBeSent.Add(workerName, [|{Author = ""; Message = ""}|])
+            allTweets <- allTweets.Add(workerName, [|""|])
+            myMentions <- myMentions.Add(workerName, [|""|])
+            userSubscribedTweets <- userSubscribedTweets.Add(workerName, [|""|])
+            // add subscribers
+            let mutable userSubscribers = [|0|]
+            if modeOfOperation = "zipf" then
+                for j in 1..(numNodes/(i+2)) do
+                    userSubscribers <- Array.concat [| userSubscribers ; [|j|] |]
+            printfn "%d: %A" i userSubscribers
+            subscribers <- subscribers.Add(workerName, userSubscribers)
 
             hashtagTweets <- hashtagTweets.Add("", [|""|])
             Console.WriteLine("Initialized all users!")
@@ -156,76 +173,80 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailb
                 ALL_COMPUTATIONS_DONE <- 1
             if userId < numNodes then
                 let mutable userName = sprintf "User%i" userId
-
                 // store tweet for user
-                let mutable allTweetsByUser = allTweets.[userName]
-                allTweetsByUser <- Array.concat [| allTweetsByUser ; [|tweetString|] |]
-                allTweets <- allTweets.Add(userName, allTweetsByUser)
+                if allTweets.ContainsKey(userName) then
+                    let mutable allTweetsByUser = allTweets.[userName]
+                    allTweetsByUser <- Array.concat [| allTweetsByUser ; [|tweetString|] |]
+                    allTweets <- allTweets.Add(userName, allTweetsByUser)
 
-                // store hashtags for tweet
-                let userHashtags = searchHashtags tweetString
-                for hashtags in userHashtags do
-                    if hashtagTweets.ContainsKey(hashtags) then
-                        let mutable thisHashtagTweets = hashtagTweets.[hashtags]
-                        thisHashtagTweets <- Array.concat [| thisHashtagTweets ; [|tweetString|] |]
-                        hashtagTweets <- hashtagTweets.Add(hashtags, thisHashtagTweets)
-                    else
-                        hashtagTweets <- hashtagTweets.Add(hashtags, [|tweetString|]) 
-
-                // store user mentions for tweet
-                let userMentions = searchMentions tweetString
-                for mentioned in userMentions do
-                    let mutable myMentionedTweets = myMentions.[mentioned]
-                    myMentionedTweets <- Array.concat [| myMentionedTweets ; [|tweetString|] |]
-                    myMentions <- myMentions.Add(mentioned, myMentionedTweets)
-
-                // who should this tweet be sent out to?
-                if subscribers.ContainsKey(userName) then
-                    let mutable allSubscribers = subscribers.[userName]
-                    allSubscribers <- allSubscribers |> Array.filter ((<>) -1 )
-                    
-                    for mentioned in userMentions do
-                        let mentionedId = matchSample userRegexMatch mentioned
-                        if mentionedId < numNodes then
-                            allSubscribers <- allSubscribers |> Array.filter ((<>) mentionedId )
-                            allSubscribers <- Array.concat [| allSubscribers ; [|mentionedId|] |]
-
-                    for subs in allSubscribers do
-                        let mutable destination = sprintf "User%i" subs
-                        // store in user subscribed tweets
-                        let mutable newUserSubTweets = userSubscribedTweets.[destination]
-                        newUserSubTweets <- Array.concat [| newUserSubTweets ; [|tweetString|] |]
-                        userSubscribedTweets <- userSubscribedTweets.Add(destination, newUserSubTweets)
-
-                        // should we send it or not?
-                        let mutable userFoundOffline = false
-                        let tweet = {Author = userName; Message = tweetString}
-                        for offlineUsersCurrent in offlineUsers do
-                            if not userFoundOffline then
-                                if offlineUsersCurrent = subs then
-                                    userFoundOffline <- true
-                        if userFoundOffline then
-                            let mutable usertweetsToBeSent = tweetsToBeSent.[destination]
-                            usertweetsToBeSent <- Array.concat [| usertweetsToBeSent ; [|tweet|] |]
-                            tweetsToBeSent <- tweetsToBeSent.Add(destination, usertweetsToBeSent)
+                    // store hashtags for tweet
+                    let userHashtags = searchHashtags tweetString
+                    for hashtags in userHashtags do
+                        if hashtagTweets.ContainsKey(hashtags) then
+                            let mutable thisHashtagTweets = hashtagTweets.[hashtags]
+                            thisHashtagTweets <- Array.concat [| thisHashtagTweets ; [|tweetString|] |]
+                            hashtagTweets <- hashtagTweets.Add(hashtags, thisHashtagTweets)
                         else
-                            let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (subs |> string)) system
-                            let data = {Author = userName |> string; Message = tweetString; Operation = "ReceiveTweet"}
-                            let json = Json.serialize data
-                            destinationRef <! json
+                            hashtagTweets <- hashtagTweets.Add(hashtags, [|tweetString|]) 
+
+                    // store user mentions for tweet
+                    let userMentions = searchMentions tweetString
+                    for mentioned in userMentions do
+                        if myMentions.ContainsKey(mentioned) then
+                            let mutable myMentionedTweets = myMentions.[mentioned]
+                            myMentionedTweets <- Array.concat [| myMentionedTweets ; [|tweetString|] |]
+                            myMentions <- myMentions.Add(mentioned, myMentionedTweets)
+
+                    // who should this tweet be sent out to?
+                    if subscribers.ContainsKey(userName) then
+                        let mutable allSubscribers = subscribers.[userName]
+                        allSubscribers <- allSubscribers |> Array.filter ((<>) -1 )
+                        
+                        for mentioned in userMentions do
+                            let mentionedId = matchSample userRegexMatch mentioned
+                            if mentionedId < numNodes then
+                                allSubscribers <- allSubscribers |> Array.filter ((<>) mentionedId )
+                                allSubscribers <- Array.concat [| allSubscribers ; [|mentionedId|] |]
+
+                        for subs in allSubscribers do
+                            let mutable destination = sprintf "User%i" subs
+                            // store in user subscribed tweets
+                            if userSubscribedTweets.ContainsKey(destination) then
+                                let mutable newUserSubTweets = userSubscribedTweets.[destination]
+                                newUserSubTweets <- Array.concat [| newUserSubTweets ; [|tweetString|] |]
+                                userSubscribedTweets <- userSubscribedTweets.Add(destination, newUserSubTweets)
+
+                                // should we send it or not?
+                                let mutable userFoundOffline = false
+                                let tweet = {Author = userName; Message = tweetString}
+                                for offlineUsersCurrent in offlineUsers do
+                                    if not userFoundOffline then
+                                        if offlineUsersCurrent = subs then
+                                            userFoundOffline <- true
+                                if userFoundOffline then
+                                    if tweetsToBeSent.ContainsKey(destination) then
+                                        let mutable usertweetsToBeSent = tweetsToBeSent.[destination]
+                                        usertweetsToBeSent <- Array.concat [| usertweetsToBeSent ; [|tweet|] |]
+                                        tweetsToBeSent <- tweetsToBeSent.Add(destination, usertweetsToBeSent)
+                                else
+                                    let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (subs |> string)) system
+                                    let data = {Author = userName |> string; Message = tweetString; Operation = "ReceiveTweet"}
+                                    let json = Json.serialize data
+                                    destinationRef <! json
                     
         | "Retweet" ->
             // choose a random user and ask them for a random tweet
             let userId = message.Author |> int
             let mutable randomUserId = random.Next(numNodes)
             let mutable randomUserName = sprintf "User%i" randomUserId
-            let allRandomUserTweets = allTweets.[randomUserName]
-            let randomTweetNumber = random.Next(allRandomUserTweets.Length)
-            if randomTweetNumber < allRandomUserTweets.Length then
-                let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
-                let data = {Author = "" |> string; Message = allRandomUserTweets.[randomTweetNumber]; Operation = "ReceiveTweet"}
-                let json = Json.serialize data
-                destinationRef <! json
+            if allTweets.ContainsKey(randomUserName) then
+                let allRandomUserTweets = allTweets.[randomUserName]
+                let randomTweetNumber = random.Next(allRandomUserTweets.Length)
+                if randomTweetNumber < allRandomUserTweets.Length then
+                    let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
+                    let data = {Author = "" |> string; Message = allRandomUserTweets.[randomTweetNumber]; Operation = "ReceiveTweet"}
+                    let json = Json.serialize data
+                    destinationRef <! json
 
         | "Subscribe" ->
             let userId = message.Author |> int
@@ -260,34 +281,36 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailb
             let userId = message.Author |> int
             let mutable userName = sprintf "User%i" userId
             if userId < numNodes then
-                let mutable usertweetsToBeSent = tweetsToBeSent.[userName]
-                offlineUsers <- offlineUsers |> Array.filter ((<>) userId )
-                for tweet in usertweetsToBeSent do
-                    let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
-                    let data = {Author = tweet.Author |> string; Message = tweet.Message; Operation = "ReceiveTweet"}
-                    let json = Json.serialize data
-                    destinationRef <! json
+                if tweetsToBeSent.ContainsKey(userName) then
+                    let mutable usertweetsToBeSent = tweetsToBeSent.[userName]
+                    offlineUsers <- offlineUsers |> Array.filter ((<>) userId )
+                    for tweet in usertweetsToBeSent do
+                        let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
+                        let data = {Author = tweet.Author |> string; Message = tweet.Message; Operation = "ReceiveTweet"}
+                        let json = Json.serialize data
+                        destinationRef <! json
                 tweetsToBeSent <- tweetsToBeSent.Add(userName, [|{Author = ""; Message = ""}|])
 
         | "QuerySubscribedTweets" ->
             let userId = message.Author |> int
             let searchString = message.Message
             let mutable userName = sprintf "User%i" userId
-            let mutable newUserSubTweets = userSubscribedTweets.[userName]
-            newUserSubTweets <- newUserSubTweets |> Array.filter ((<>) "" )
-            let mutable tweetsFound = searchTweets newUserSubTweets searchString
-            let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
+            if userSubscribedTweets.ContainsKey(userName) then
+                let mutable newUserSubTweets = userSubscribedTweets.[userName]
+                newUserSubTweets <- newUserSubTweets |> Array.filter ((<>) "" )
+                let mutable tweetsFound = searchTweets newUserSubTweets searchString
+                let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
 
-            if tweetsFound.Length <> 0 then
-                let arr = Json.serialize tweetsFound    
-                let data = {Author = searchString |> string; Message = arr; Operation = "ReceiveQuerySubscribedTweets"}
-                let json = Json.serialize data
-                destinationRef <! json
-            else 
-                let arr = Json.serialize [| "No tweets found" |]    
-                let data = {Author = searchString |> string; Message = arr; Operation = "ReceiveQuerySubscribedTweets"}
-                let json = Json.serialize data
-                destinationRef <! json
+                if tweetsFound.Length <> 0 then
+                    let arr = Json.serialize tweetsFound    
+                    let data = {Author = searchString |> string; Message = arr; Operation = "ReceiveQuerySubscribedTweets"}
+                    let json = Json.serialize data
+                    destinationRef <! json
+                else 
+                    let arr = Json.serialize [| "No tweets found" |]    
+                    let data = {Author = searchString |> string; Message = arr; Operation = "ReceiveQuerySubscribedTweets"}
+                    let json = Json.serialize data
+                    destinationRef <! json
 
         | "QueryHashtags" ->
             let userId = message.Author |> int  
@@ -310,19 +333,20 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailb
         | "QueryMentions" ->
             let userId = message.Author |> int  
             let mutable userName = sprintf "User%i" userId
-            let mutable userMentions = myMentions.[userName]
-            let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
-            
-            if userMentions.Length <> 0 then
-                let arr = Json.serialize userMentions    
-                let data = {Author = "" |> string; Message = arr; Operation = "ReceiveQueryMentions"}
-                let json = Json.serialize data
-                destinationRef <! json
-            else
-                let arr = Json.serialize [| "No tweets found" |]    
-                let data = {Author = "" |> string; Message = arr; Operation = "ReceiveQueryMentions"}
-                let json = Json.serialize data
-                destinationRef <! json
+            if myMentions.ContainsKey(userName) then
+                let mutable userMentions = myMentions.[userName]
+                let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
+                
+                if userMentions.Length <> 0 then
+                    let arr = Json.serialize userMentions    
+                    let data = {Author = "" |> string; Message = arr; Operation = "ReceiveQueryMentions"}
+                    let json = Json.serialize data
+                    destinationRef <! json
+                else
+                    let arr = Json.serialize [| "No tweets found" |]    
+                    let data = {Author = "" |> string; Message = arr; Operation = "ReceiveQueryMentions"}
+                    let json = Json.serialize data
+                    destinationRef <! json
             
         | _ -> 
             printfn "Invalid Request"
@@ -333,12 +357,52 @@ let MyengineActor (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailb
     loop ()
 
 
+let MyengineLoadBalancer (numNodesVal:int) (numTweetsVal:int) (operation:string) (mailbox : Actor<_>) = 
+
+    let numNodes = numNodesVal 
+    let numTweets = numTweetsVal
+    let modeOfOperation = operation
+    let mutable tweetsReceived = 0
+    let selfStopwatchEngine = System.Diagnostics.Stopwatch()
+
+    let rec loop() = actor {
+        let! json = mailbox.Receive()
+        let message = Json.deserialize<TweetApiMessage> json
+        let sender = mailbox.Sender()
+        let operation = message.Operation
+        
+        match operation with
+        | "StartEngine" ->
+            for i in 0..numNodes-1 do
+                let mutable engineName = sprintf "engineActor%i" i
+                let mutable userActor = spawn system2 engineName (MyengineActor i numNodes numTweets modeOfOperation)
+                let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9003/user/engineActor"+ (i |> string)) system
+                let data = {Author = ""; Message = ""; Operation = "StartEngine"}
+                let json = Json.serialize data
+                destinationRef <! json
+
+        | "GetNumNodes" ->
+            let userId = message.Author |> int
+            let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9001/user/User"+ (userId |> string)) system
+            let data = {Author = userId |> string; Message = numNodes |> string; Operation = "GetNumNodes"}
+            let json = Json.serialize data
+            destinationRef <! json
+
+        | _ -> 
+            let userId = message.Author |> int
+            let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9003/user/engineActor"+ (userId |> string)) system
+            destinationRef <! json
+
+        return! loop()
+    }
+    loop ()
+
 let main argv =
     let numNodes = ((Array.get argv 1) |> int)
     let numTweets = ((Array.get argv 2) |> int)
     let modeOfOperation = ((Array.get argv 3) |> string)
 
-    let engineActor = spawn system "engineActor" (MyengineActor numNodes numTweets modeOfOperation)
+    let engineActor = spawn system "engineActor" (MyengineLoadBalancer numNodes numTweets modeOfOperation)
     let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9002/user/engineActor") system
     let data = {Author = ""; Message = ""; Operation = "StartEngine"}
     let json = Json.serialize data
