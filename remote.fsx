@@ -25,19 +25,8 @@ let config =
             }
         }"
 
-let config2 =
-    Configuration.parse
-        @"akka {
-            actor.provider = ""Akka.Remote.RemoteActorRefProvider, Akka.Remote""
-            remote.helios.tcp {
-                hostname = ""127.0.0.1""
-                port = 9003
-            log-dead-letters-during-shutdown = off
-            log-dead-letters = off
-            }
-        }"
+
 let system = System.create "Twitter" config
-let system2 = System.create "Twitter" config2
 
 let mutable subscribers = Map.empty
 let mutable tweetsToBeSent = Map.empty
@@ -375,8 +364,8 @@ let MyengineLoadBalancer (numNodesVal:int) (numTweetsVal:int) (operation:string)
         | "StartEngine" ->
             for i in 0..numNodes-1 do
                 let mutable engineName = sprintf "engineActor%i" i
-                let mutable userActor = spawn system2 engineName (MyengineActor i numNodes numTweets modeOfOperation)
-                let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9003/user/engineActor"+ (i |> string)) system
+                let mutable userActor = spawn system engineName (MyengineActor i numNodes numTweets modeOfOperation)
+                let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9002/user/engineActor"+ (i |> string)) system
                 let data = {Author = ""; Message = ""; Operation = "StartEngine"}
                 let json = Json.serialize data
                 destinationRef <! json
@@ -390,7 +379,8 @@ let MyengineLoadBalancer (numNodesVal:int) (numTweetsVal:int) (operation:string)
 
         | _ -> 
             let userId = message.Author |> int
-            let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9003/user/engineActor"+ (userId |> string)) system
+            //let destinationRef = select ("akka.tcp://Twitter@127.0.0.1:9002/user/engineActor"+ (userId |> string)) system
+            let destinationRef = system.ActorSelection("akka.tcp://Twitter@127.0.0.1:9002/user/engineActor"+ (userId |> string))
             destinationRef <! json
 
         return! loop()
